@@ -3,10 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FlashCast 极速投屏 (智能线路版)</title>
+    <title>FlashCast 极速投屏 (防乱码版)</title>
     
-    <!-- 1. 核心库全部切换为国内 Staticfile CDN (七牛云)，确保秒开 -->
+    <!-- 关键修复：内置核心 CSS，防止样式加载失败导致页面错乱 -->
+    <style>
+        /* 强制隐藏类，确保加载完成前不显示乱七八糟的内容 */
+        .hidden { display: none !important; }
+        
+        /* 基础布局兜底 */
+        body { margin: 0; padding: 0; background-color: #111827; color: white; font-family: sans-serif; }
+        .loading-fallback { position: fixed; inset: 0; background: #111827; display: flex; flex-direction: column; align-items: center; justify-content: center; z-index: 9999; }
+    </style>
+
+    <!-- 1. 核心库 (增加备用源) -->
     <script src="https://cdn.staticfile.net/mqtt/4.3.7/mqtt.min.js"></script>
+    <!-- 尝试使用 unpkg 作为 tailwind 的备选，或者保持 staticfile -->
     <script src="https://cdn.staticfile.net/tailwindcss/3.3.5/tailwind.min.js"></script>
     <script src="https://cdn.staticfile.net/qrcodejs/1.0.0/qrcode.min.js"></script>
     
@@ -16,9 +27,9 @@
         let peerConnection = null;
         let localStream = null;
         let roomId = null;
-        const appPrefix = "fc_chn_v8_"; // 升级版本号，隔离旧版消息
+        const appPrefix = "fc_chn_v8_"; 
 
-        // --- 备用信令服务器列表 (自动切换) ---
+        // --- 备用信令服务器列表 ---
         const brokerList = [
             { name: "线路1 (EMQX)", url: 'wss://broker.emqx.io:8084/mqtt' },
             { name: "线路2 (HiveMQ)", url: 'wss://broker.hivemq.com:8000/mqtt' },
@@ -26,21 +37,18 @@
         ];
         let currentBrokerIndex = 0;
 
-        // --- STUN 服务器 (WebRTC 必须) ---
         const rtcConfig = {
             iceServers: [
                 { urls: 'stun:stun.bgp.xmpp.net' },
-                { urls: 'stun:stun.l.google.com:19302' }, 
-                { urls: 'stun:stun1.l.google.com:19302' }
+                { urls: 'stun:stun.l.google.com:19302' }
             ]
         };
 
-        // --- 微信浏览器检测 ---
         function isWeChat() {
             return /MicroMessenger/i.test(navigator.userAgent);
         }
 
-        // --- 初始化 MQTT 连接 (带重试机制) ---
+        // --- 初始化 MQTT ---
         function initMQTT() {
             return new Promise((resolve, reject) => {
                 connectToBroker(resolve);
@@ -48,17 +56,14 @@
         }
 
         function connectToBroker(resolve) {
-            if (client) {
-                try { client.end(); } catch(e) {}
-            }
+            if (client) { try { client.end(); } catch(e) {} }
 
             const broker = brokerList[currentBrokerIndex];
             const statusEl = document.getElementById('status-text');
             const retryBtn = document.getElementById('retry-btn');
             
-            console.log(`正在尝试连接: ${broker.name}`);
-            statusEl.innerText = `正在连接 ${broker.name}...`;
-            retryBtn.classList.remove('hidden'); // 显示切换按钮
+            if(statusEl) statusEl.innerText = `正在连接 ${broker.name}...`;
+            if(retryBtn) retryBtn.classList.remove('hidden');
 
             const clientId = 'fc_user_' + Math.random().toString(16).substring(2, 8);
 
@@ -66,78 +71,63 @@
                 clientId: clientId,
                 keepalive: 60,
                 clean: true,
-                connectTimeout: 5000, // 5秒超时
-                reconnectPeriod: 0 // 禁止自动重连，由我们手动控制切换
+                connectTimeout: 5000,
+                reconnectPeriod: 0
             });
 
-            // 设置超时计时器，如果5秒没连上，自动切下一个
             const timeoutTimer = setTimeout(() => {
                 if (!client.connected) {
-                    console.warn(`${broker.name} 连接超时`);
                     tryNextBroker(resolve);
                 }
             }, 6000);
 
             client.on('connect', () => {
                 clearTimeout(timeoutTimer);
-                console.log("信令服务器已连接");
+                console.log("Connected to", broker.name);
                 document.getElementById('loading-screen').classList.add('hidden');
                 resolve();
             });
 
             client.on('error', (err) => {
                 clearTimeout(timeoutTimer);
-                console.error("MQTT Error:", err);
                 tryNextBroker(resolve);
-            });
-            
-            // 某些情况下连接断开也触发切换
-            client.on('close', () => {
-               // 这里不做处理，避免连接成功后的正常断开触发重连循环
             });
         }
 
         function tryNextBroker(resolve) {
             currentBrokerIndex++;
             if (currentBrokerIndex >= brokerList.length) {
-                currentBrokerIndex = 0; // 循环一轮
-                document.getElementById('status-text').innerText = "网络连接较差，请检查网络...";
+                currentBrokerIndex = 0;
+                const statusEl = document.getElementById('status-text');
+                if(statusEl) statusEl.innerText = "网络连接较差，正在重试...";
             }
-            // 延迟 500ms 重试下一个
             setTimeout(() => connectToBroker(resolve), 500);
         }
 
-        // 手动切换线路
         window.manualSwitchBroker = () => {
             currentBrokerIndex++;
             if (currentBrokerIndex >= brokerList.length) currentBrokerIndex = 0;
-            // 如果 Promise 还没 resolve，这里直接重新跑连接逻辑会有问题吗？
-            // 简单处理：重新加载页面是更稳妥的，但为了体验，我们直接调用连接函数
-            // 注意：这只在 loading 阶段有效
             const statusEl = document.getElementById('status-text');
-            statusEl.innerText = "正在手动切换线路...";
-            // 重新触发连接逻辑（由于上面的 Promise 还在 pending，这里实际上是重新发起一次尝试）
-            // 为了简化，我们只更新 index，并在 console 输出，实际的自动重试逻辑会接管
-            // 或者我们可以强制断开当前的，触发 error/close
+            if(statusEl) statusEl.innerText = "正在手动切换线路...";
             if(client) client.end(); 
+            // 重新触发连接将由 error/close 事件或现有逻辑处理，或者这里直接重调
+            setTimeout(() => connectToBroker(() => {}), 200); 
         };
 
         // --- 页面加载 ---
         window.onload = async () => {
-            // 如果是微信，显示提示层
+            // 确保样式加载失败时也能看
             if (isWeChat()) {
                 document.getElementById('wechat-tip').classList.remove('hidden');
             }
-
             await initMQTT();
             checkUrlParams();
         };
 
         function checkUrlParams() {
             const params = new URLSearchParams(window.location.search);
-            const urlRoomId = params.get('roomId');
-            if (urlRoomId) {
-                roomId = urlRoomId;
+            if (params.get('roomId')) {
+                roomId = params.get('roomId');
                 showSender();
             } else {
                 showHome();
@@ -154,7 +144,7 @@
             document.getElementById(id).classList.remove('hidden');
         }
 
-        // --- 接收端逻辑 ---
+        // --- 接收端 ---
         async function startReceiver() {
             if (!client || !client.connected) {
                 document.getElementById('loading-screen').classList.remove('hidden');
@@ -164,45 +154,33 @@
             roomId = Math.floor(100000 + Math.random() * 900000).toString();
             document.getElementById('room-display').innerText = roomId;
 
-            // 本地生成二维码 (无需网络请求，速度快)
             const connectUrl = `${window.location.href.split('?')[0]}?roomId=${roomId}`;
-            document.getElementById('qr-container').innerHTML = ""; // 清空旧的
-            new QRCode(document.getElementById("qr-container"), {
+            const qrContainer = document.getElementById("qr-container");
+            qrContainer.innerHTML = "";
+            new QRCode(qrContainer, {
                 text: connectUrl,
                 width: 180,
                 height: 180,
                 colorDark : "#000000",
                 colorLight : "#ffffff",
-                correctLevel : QRCode.CorrectLevel.H
+                correctLevel : QRCode.CorrectLevel.L
             });
             
-            document.getElementById('connect-link').innerText = "手机扫码或输入网址";
-
-            const topic = `${appPrefix}${roomId}/#`;
-            client.subscribe(topic);
-
+            client.subscribe(`${appPrefix}${roomId}/#`);
             peerConnection = new RTCPeerConnection(rtcConfig);
 
             client.on('message', async (topic, message) => {
                 const msg = JSON.parse(message.toString());
-                
-                if (topic.includes('/offer') && !peerConnection.currentRemoteDescription) {
+                if (topic.includes('/offer')) {
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(msg));
                     const answer = await peerConnection.createAnswer();
                     await peerConnection.setLocalDescription(answer);
                     client.publish(`${appPrefix}${roomId}/answer`, JSON.stringify(answer));
                 }
-                
                 if (topic.includes('/ice_sender')) {
                     try { await peerConnection.addIceCandidate(new RTCIceCandidate(msg)); } catch(e){}
                 }
             });
-
-            peerConnection.onicecandidate = event => {
-                if (event.candidate) {
-                    client.publish(`${appPrefix}${roomId}/ice_receiver`, JSON.stringify(event.candidate));
-                }
-            };
 
             peerConnection.ontrack = event => {
                 const video = document.getElementById('remote-video');
@@ -210,19 +188,19 @@
                 document.getElementById('receiver-waiting').classList.add('hidden');
                 video.classList.remove('hidden');
             };
+            
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) client.publish(`${appPrefix}${roomId}/ice_receiver`, JSON.stringify(event.candidate));
+            };
         }
 
-        // --- 发送端逻辑 ---
+        // --- 发送端 ---
         window.startSharing = async (type) => {
             const inputId = document.getElementById('room-input').value;
             if(!inputId) return alert("请输入连接码");
             
             document.getElementById('sender-status').innerText = "正在请求连接...";
-            
-            if (!client || !client.connected) {
-                document.getElementById('loading-screen').classList.remove('hidden');
-                await initMQTT();
-            }
+            if (!client || !client.connected) await initMQTT();
 
             client.subscribe(`${appPrefix}${inputId}/answer`);
             client.subscribe(`${appPrefix}${inputId}/ice_receiver`);
@@ -231,20 +209,13 @@
 
             try {
                 if (type === 'screen') {
-                    // 部分手机浏览器不支持 getDisplayMedia，做个容错提示
-                    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-                        alert("您的手机浏览器可能不支持屏幕共享，建议使用 Chrome 或 Safari，或者尝试【投射摄像头】。");
-                        document.getElementById('sender-status').innerText = "";
-                        return;
-                    }
+                    if (!navigator.mediaDevices?.getDisplayMedia) return alert("您的浏览器不支持屏幕共享，请使用 Chrome/Safari");
                     localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
                 } else {
                     localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
                 }
             } catch (err) {
-                alert("获取权限失败: " + err.message + "\n请确保使用的是 HTTPS 链接且已授权。");
-                document.getElementById('sender-status').innerText = "";
-                return;
+                return alert("无法获取权限，请确保使用 HTTPS 访问。");
             }
 
             localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
@@ -255,26 +226,21 @@
 
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
-            
             client.publish(`${appPrefix}${inputId}/offer`, JSON.stringify(offer));
 
             client.on('message', async (topic, message) => {
                 const msg = JSON.parse(message.toString());
-
                 if (topic.includes('/answer')) {
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(msg));
                     document.getElementById('sender-status').innerText = "连接成功";
                 }
-
                 if (topic.includes('/ice_receiver')) {
                     try { await peerConnection.addIceCandidate(new RTCIceCandidate(msg)); } catch(e){}
                 }
             });
-
+            
             peerConnection.onicecandidate = event => {
-                if (event.candidate) {
-                    client.publish(`${appPrefix}${inputId}/ice_sender`, JSON.stringify(event.candidate));
-                }
+                if (event.candidate) client.publish(`${appPrefix}${inputId}/ice_sender`, JSON.stringify(event.candidate));
             };
         };
 
@@ -291,91 +257,21 @@
     <div id="wechat-tip" class="hidden fixed inset-0 z-[60] bg-black/90 flex flex-col items-center justify-center text-center p-8" onclick="this.classList.add('hidden')">
         <div class="text-4xl mb-4">↗️</div>
         <h2 class="text-xl font-bold text-white mb-2">微信可能无法使用</h2>
-        <p class="text-gray-400 text-sm">请点击右上角菜单<br>选择 <span class="text-green-400 font-bold">"在浏览器打开"</span></p>
-        <p class="mt-8 text-xs text-gray-600">(点击屏幕任意处关闭提示)</p>
+        <p class="text-gray-400 text-sm">请点击右上角菜单，选择"在浏览器打开"</p>
     </div>
 
-    <!-- 加载中 -->
-    <div id="loading-screen" class="fixed inset-0 flex flex-col items-center justify-center bg-gray-900 z-50">
-        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
-        <p id="status-text" class="text-gray-400 text-sm mb-4">正在连接服务器 (智能线路)...</p>
+    <!-- 加载中 (增加了 loading-fallback 类作为 CSS 兜底) -->
+    <div id="loading-screen" class="loading-fallback fixed inset-0 flex flex-col items-center justify-center bg-gray-900 z-50">
+        <!-- 使用纯 CSS 绘制一个简单的加载圈，防止 Tailwind 没加载时看不到东西 -->
+        <div style="width: 40px; height: 40px; border: 4px solid #3b82f6; border-top-color: transparent; border-radius: 50%; animation: spin 1s linear infinite;"></div>
+        <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
         
-        <!-- 手动切换按钮 -->
-        <button id="retry-btn" onclick="manualSwitchBroker()" class="hidden px-4 py-2 bg-gray-800 border border-gray-600 rounded-lg text-xs hover:bg-gray-700 transition">
-            连接慢？点此切换线路
+        <p id="status-text" class="text-gray-400 text-sm mt-4 mb-4">正在连接服务器...</p>
+        <button id="retry-btn" onclick="manualSwitchBroker()" class="hidden px-4 py-2 bg-gray-800 border border-gray-600 rounded text-xs text-white">
+            点此切换线路
         </button>
     </div>
 
     <!-- 首页 -->
-    <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full">
-        <h1 class="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-green-400 mb-4">FlashCast</h1>
-        <p class="text-gray-400 mb-2">极速投屏 (智能线路版 v8.0)</p>
-        <div class="flex gap-2 mb-12">
-            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">多线路聚合</span>
-            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">自动重连</span>
-        </div>
-        
-        <div class="grid md:grid-cols-2 gap-8 w-full max-w-4xl">
-            <button onclick="showReceiver()" class="p-8 bg-gray-800 rounded-2xl hover:bg-gray-700 transition border border-gray-700 hover:border-blue-500 group">
-                <div class="text-4xl mb-4 group-hover:scale-110 transition">🖥️</div>
-                <h2 class="text-2xl font-bold mb-2">我是电脑 (接收端)</h2>
-            </button>
-            <button onclick="showSender()" class="p-8 bg-gray-800 rounded-2xl hover:bg-gray-700 transition border border-gray-700 hover:border-green-500 group">
-                <div class="text-4xl mb-4 group-hover:scale-110 transition">📱</div>
-                <h2 class="text-2xl font-bold mb-2">我是手机 (发送端)</h2>
-            </button>
-        </div>
-    </div>
-
-    <!-- 接收端 -->
-    <div id="receiver-screen" class="view-screen hidden h-full relative bg-black">
-        <button onclick="showHome()" class="absolute top-4 left-4 z-10 p-2 bg-gray-800 rounded-full hover:bg-gray-700">✕</button>
-        <div id="receiver-waiting" class="flex flex-col items-center justify-center h-full">
-            <div class="bg-gray-800 p-8 rounded-3xl border border-gray-700 text-center max-w-md shadow-2xl">
-                <h2 class="text-xl text-gray-300 mb-4">手机扫码连接</h2>
-                <!-- QR Container -->
-                <div id="qr-container" class="bg-white p-4 rounded-xl inline-block mb-4 flex justify-center items-center"></div>
-                
-                <p id="connect-link" class="text-gray-500 text-xs mb-4">...</p>
-                <div class="text-5xl font-mono font-bold tracking-widest text-white py-4"><span id="room-display">...</span></div>
-                <p class="mt-2 text-sm text-green-500 animate-pulse">服务已就绪，等待投屏...</p>
-            </div>
-        </div>
-        <video id="remote-video" autoplay playsinline class="hidden w-full h-full object-contain"></video>
-    </div>
-
-    <!-- 发送端 -->
-    <div id="sender-screen" class="view-screen hidden h-full flex flex-col bg-gray-900">
-        <div class="p-4 bg-gray-800 flex items-center gap-4"><button onclick="showHome()" class="text-xl">✕</button></div>
-        <div class="flex-1 p-6 flex flex-col items-center justify-center">
-            
-            <div id="sender-ui-start" class="w-full max-w-sm space-y-6">
-                <div>
-                    <label class="block text-gray-400 text-sm mb-2">输入连接码</label>
-                    <input type="number" id="room-input" class="w-full bg-gray-800 border border-gray-600 rounded-xl p-4 text-3xl text-center text-white focus:border-green-500 outline-none transition" placeholder="000000">
-                </div>
-                <button onclick="startSharing('screen')" class="w-full bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-bold text-lg shadow-lg shadow-blue-900/50 transition">
-                    📡 投射屏幕 (推荐)
-                </button>
-                <button onclick="startSharing('camera')" class="w-full bg-gray-700 hover:bg-gray-600 text-white p-4 rounded-xl font-bold text-lg transition">
-                    📷 投射摄像头
-                </button>
-                <p id="sender-status" class="text-center text-gray-500 text-sm h-5"></p>
-                <p class="text-xs text-center text-gray-600">注：iOS 请用 Safari，安卓推荐 Chrome</p>
-            </div>
-
-            <div id="sender-ui-streaming" class="hidden w-full h-full flex flex-col items-center justify-center">
-                <div class="relative w-full aspect-video bg-black rounded-2xl overflow-hidden mb-8 border border-gray-700">
-                    <video id="local-video" autoplay muted playsinline class="w-full h-full object-cover opacity-60"></video>
-                    <div class="absolute inset-0 flex items-center justify-center">
-                        <span class="text-green-400 font-bold text-xl animate-pulse">正在投屏中...</span>
-                    </div>
-                </div>
-                <button onclick="stopSharing()" class="bg-red-600 hover:bg-red-500 text-white px-10 py-4 rounded-full font-bold text-lg shadow-xl transition">
-                    🛑 停止投屏
-                </button>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
+    <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full text-center">
+        <h1 class="text-4xl md:text-5xl
