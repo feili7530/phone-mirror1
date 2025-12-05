@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FlashCast 极速投屏 (国内版)</title>
-    <!-- 引入 MQTT 库 (用于替代 Firebase，国内可访问) -->
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-    <!-- 引入 Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <title>FlashCast 极速投屏 (国内极速版)</title>
+    
+    <!-- 1. 核心库全部切换为国内 Staticfile CDN (七牛云)，确保秒开 -->
+    <script src="https://cdn.staticfile.net/mqtt/4.3.7/mqtt.min.js"></script>
+    <script src="https://cdn.staticfile.net/tailwindcss/3.3.5/tailwind.min.js"></script>
+    <script src="https://cdn.staticfile.net/qrcodejs/1.0.0/qrcode.min.js"></script>
     
     <script>
         // --- 全局变量 ---
@@ -15,21 +16,26 @@
         let peerConnection = null;
         let localStream = null;
         let roomId = null;
-        const appPrefix = "fc_chn_v7_"; //以此前缀隔离消息
+        const appPrefix = "fc_chn_v7_"; 
 
-        // --- STUN 服务器 (用于穿透内网，选用国内通常可连的) ---
+        // --- STUN 服务器 (WebRTC 必须) ---
         const rtcConfig = {
             iceServers: [
-                { urls: 'stun:stun.bgp.xmpp.net' }, // 公共 STUN
-                { urls: 'stun:stun.l.google.com:19302' }, // Google STUN (UDP协议在国内通常可用)
+                { urls: 'stun:stun.bgp.xmpp.net' },
+                { urls: 'stun:stun.l.google.com:19302' }, 
                 { urls: 'stun:stun1.l.google.com:19302' }
             ]
         };
 
-        // --- 初始化 MQTT 连接 (信令服务器) ---
+        // --- 微信浏览器检测 ---
+        function isWeChat() {
+            return /MicroMessenger/i.test(navigator.userAgent);
+        }
+
+        // --- 初始化 MQTT 连接 ---
         function initMQTT() {
             return new Promise((resolve, reject) => {
-                // 使用 EMQX 公共服务器 (支持 WSS 加密连接)
+                // 使用 EMQX 公共服务器 (国内访问较快)
                 const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
                 const clientId = 'fc_user_' + Math.random().toString(16).substring(2, 8);
 
@@ -51,14 +57,19 @@
 
                 client.on('error', (err) => {
                     console.error("MQTT Error:", err);
-                    document.getElementById('status-text').innerText = "连接服务失败，请刷新重试";
-                    reject(err);
+                    document.getElementById('status-text').innerText = "服务连接受阻，正在重试...";
+                    // 不reject，让它自动重连
                 });
             });
         }
 
         // --- 页面加载 ---
         window.onload = async () => {
+            // 如果是微信，显示提示层
+            if (isWeChat()) {
+                document.getElementById('wechat-tip').classList.remove('hidden');
+            }
+
             await initMQTT();
             checkUrlParams();
         };
@@ -84,56 +95,54 @@
             document.getElementById(id).classList.remove('hidden');
         }
 
-        // --- 接收端逻辑 (电脑) ---
+        // --- 接收端逻辑 ---
         async function startReceiver() {
             if (!client || !client.connected) await initMQTT();
 
-            // 生成6位房间号
             roomId = Math.floor(100000 + Math.random() * 900000).toString();
             document.getElementById('room-display').innerText = roomId;
 
-            // 生成二维码链接
+            // 本地生成二维码 (无需网络请求，速度快)
             const connectUrl = `${window.location.href.split('?')[0]}?roomId=${roomId}`;
-            document.getElementById('qr-img').src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(connectUrl)}&bgcolor=1e293b&color=ffffff&margin=10`;
-            document.getElementById('connect-link').innerText = "手机扫码即可连接";
+            document.getElementById('qr-container').innerHTML = ""; // 清空旧的
+            new QRCode(document.getElementById("qr-container"), {
+                text: connectUrl,
+                width: 180,
+                height: 180,
+                colorDark : "#000000",
+                colorLight : "#ffffff",
+                correctLevel : QRCode.CorrectLevel.H
+            });
+            
+            document.getElementById('connect-link').innerText = "手机扫码或输入网址";
 
-            // 订阅信令话题
-            const topic = `${appPrefix}${roomId}/#`; // 订阅该房间下所有消息
+            const topic = `${appPrefix}${roomId}/#`;
             client.subscribe(topic);
 
-            // 初始化 WebRTC
             peerConnection = new RTCPeerConnection(rtcConfig);
 
-            // 处理对方发来的消息
             client.on('message', async (topic, message) => {
                 const msg = JSON.parse(message.toString());
                 
-                // 收到发送端的 Offer
                 if (topic.includes('/offer') && !peerConnection.currentRemoteDescription) {
-                    console.log("收到 Offer");
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(msg));
                     const answer = await peerConnection.createAnswer();
                     await peerConnection.setLocalDescription(answer);
-                    // 发送 Answer 回去
                     client.publish(`${appPrefix}${roomId}/answer`, JSON.stringify(answer));
                 }
                 
-                // 收到 ICE 候选
                 if (topic.includes('/ice_sender')) {
                     try { await peerConnection.addIceCandidate(new RTCIceCandidate(msg)); } catch(e){}
                 }
             });
 
-            // 监听 ICE 候选并发送给对方
             peerConnection.onicecandidate = event => {
                 if (event.candidate) {
                     client.publish(`${appPrefix}${roomId}/ice_receiver`, JSON.stringify(event.candidate));
                 }
             };
 
-            // 收到视频流
             peerConnection.ontrack = event => {
-                console.log("收到视频流");
                 const video = document.getElementById('remote-video');
                 video.srcObject = event.streams[0];
                 document.getElementById('receiver-waiting').classList.add('hidden');
@@ -141,56 +150,55 @@
             };
         }
 
-        // --- 发送端逻辑 (手机) ---
+        // --- 发送端逻辑 ---
         window.startSharing = async (type) => {
             const inputId = document.getElementById('room-input').value;
             if(!inputId) return alert("请输入连接码");
             
-            document.getElementById('sender-status').innerText = "正在呼叫...";
+            document.getElementById('sender-status').innerText = "正在请求连接...";
             
             if (!client || !client.connected) await initMQTT();
 
-            // 订阅接收端的回复
             client.subscribe(`${appPrefix}${inputId}/answer`);
             client.subscribe(`${appPrefix}${inputId}/ice_receiver`);
 
             peerConnection = new RTCPeerConnection(rtcConfig);
 
-            // 获取媒体流
             try {
                 if (type === 'screen') {
+                    // 部分手机浏览器不支持 getDisplayMedia，做个容错提示
+                    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                        alert("您的手机浏览器可能不支持屏幕共享，建议使用 Chrome 或 Safari，或者尝试【投射摄像头】。");
+                        document.getElementById('sender-status').innerText = "";
+                        return;
+                    }
                     localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
                 } else {
                     localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
                 }
             } catch (err) {
-                alert("获取权限失败: " + err.message);
+                alert("获取权限失败: " + err.message + "\n请确保使用的是 HTTPS 链接且已授权。");
+                document.getElementById('sender-status').innerText = "";
                 return;
             }
 
-            // 添加流
             localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
             document.getElementById('local-video').srcObject = localStream;
             
-            // UI 切换
             document.getElementById('sender-ui-start').classList.add('hidden');
             document.getElementById('sender-ui-streaming').classList.remove('hidden');
 
-            // 创建 Offer
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
             
-            // 发送 Offer
             client.publish(`${appPrefix}${inputId}/offer`, JSON.stringify(offer));
 
-            // 处理接收端的回复
             client.on('message', async (topic, message) => {
                 const msg = JSON.parse(message.toString());
 
                 if (topic.includes('/answer')) {
-                    console.log("收到 Answer");
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(msg));
-                    document.getElementById('sender-status').innerText = "连接建立！";
+                    document.getElementById('sender-status').innerText = "连接成功";
                 }
 
                 if (topic.includes('/ice_receiver')) {
@@ -198,7 +206,6 @@
                 }
             });
 
-            // 发送 ICE
             peerConnection.onicecandidate = event => {
                 if (event.candidate) {
                     client.publish(`${appPrefix}${inputId}/ice_sender`, JSON.stringify(event.candidate));
@@ -215,17 +222,28 @@
 </head>
 <body class="bg-gray-900 text-white font-sans h-screen overflow-hidden">
 
+    <!-- 微信提示遮罩 -->
+    <div id="wechat-tip" class="hidden fixed inset-0 z-[60] bg-black/90 flex flex-col items-center justify-center text-center p-8" onclick="this.classList.add('hidden')">
+        <div class="text-4xl mb-4">↗️</div>
+        <h2 class="text-xl font-bold text-white mb-2">微信可能无法使用</h2>
+        <p class="text-gray-400 text-sm">请点击右上角菜单<br>选择 <span class="text-green-400 font-bold">"在浏览器打开"</span></p>
+        <p class="mt-8 text-xs text-gray-600">(点击屏幕任意处关闭提示)</p>
+    </div>
+
     <!-- 加载中 -->
     <div id="loading-screen" class="fixed inset-0 flex flex-col items-center justify-center bg-gray-900 z-50">
-        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-green-500 mb-4"></div>
-        <p id="status-text" class="text-gray-400 text-sm">正在初始化...</p>
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
+        <p id="status-text" class="text-gray-400 text-sm">正在连接服务器 (CN v7.1)...</p>
     </div>
 
     <!-- 首页 -->
     <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full">
-        <h1 class="text-5xl font-bold text-green-400 mb-4">FlashCast</h1>
-        <p class="text-gray-400 mb-2">极速投屏 (国内优化版 v7.0)</p>
-        <span class="px-2 py-1 bg-gray-800 text-xs text-gray-500 rounded mb-12">无需配置 · 无需魔法</span>
+        <h1 class="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-green-400 mb-4">FlashCast</h1>
+        <p class="text-gray-400 mb-2">极速投屏 (国内极速版 v7.1)</p>
+        <div class="flex gap-2 mb-12">
+            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">国内CDN</span>
+            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">无需配置</span>
+        </div>
         
         <div class="grid md:grid-cols-2 gap-8 w-full max-w-4xl">
             <button onclick="showReceiver()" class="p-8 bg-gray-800 rounded-2xl hover:bg-gray-700 transition border border-gray-700 hover:border-blue-500 group">
@@ -245,10 +263,10 @@
         <div id="receiver-waiting" class="flex flex-col items-center justify-center h-full">
             <div class="bg-gray-800 p-8 rounded-3xl border border-gray-700 text-center max-w-md shadow-2xl">
                 <h2 class="text-xl text-gray-300 mb-4">手机扫码连接</h2>
-                <div class="bg-white p-2 rounded-xl inline-block mb-4">
-                    <img id="qr-img" class="w-48 h-48 object-contain" alt="QR Code">
-                </div>
-                <p id="connect-link" class="text-gray-500 text-xs mb-4">生成中...</p>
+                <!-- QR Container -->
+                <div id="qr-container" class="bg-white p-4 rounded-xl inline-block mb-4 flex justify-center items-center"></div>
+                
+                <p id="connect-link" class="text-gray-500 text-xs mb-4">...</p>
                 <div class="text-5xl font-mono font-bold tracking-widest text-white py-4"><span id="room-display">...</span></div>
                 <p class="mt-2 text-sm text-green-500 animate-pulse">服务已就绪，等待投屏...</p>
             </div>
@@ -267,12 +285,13 @@
                     <input type="number" id="room-input" class="w-full bg-gray-800 border border-gray-600 rounded-xl p-4 text-3xl text-center text-white focus:border-green-500 outline-none transition" placeholder="000000">
                 </div>
                 <button onclick="startSharing('screen')" class="w-full bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-bold text-lg shadow-lg shadow-blue-900/50 transition">
-                    📡 投射屏幕
+                    📡 投射屏幕 (推荐)
                 </button>
                 <button onclick="startSharing('camera')" class="w-full bg-gray-700 hover:bg-gray-600 text-white p-4 rounded-xl font-bold text-lg transition">
                     📷 投射摄像头
                 </button>
                 <p id="sender-status" class="text-center text-gray-500 text-sm h-5"></p>
+                <p class="text-xs text-center text-gray-600">注：iOS 请用 Safari，安卓推荐 Chrome</p>
             </div>
 
             <div id="sender-ui-streaming" class="hidden w-full h-full flex flex-col items-center justify-center">
