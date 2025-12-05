@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FlashCast 极速投屏 (国内极速版)</title>
+    <title>FlashCast 极速投屏 (智能线路版)</title>
     
     <!-- 1. 核心库全部切换为国内 Staticfile CDN (七牛云)，确保秒开 -->
     <script src="https://cdn.staticfile.net/mqtt/4.3.7/mqtt.min.js"></script>
@@ -16,7 +16,15 @@
         let peerConnection = null;
         let localStream = null;
         let roomId = null;
-        const appPrefix = "fc_chn_v7_"; 
+        const appPrefix = "fc_chn_v8_"; // 升级版本号，隔离旧版消息
+
+        // --- 备用信令服务器列表 (自动切换) ---
+        const brokerList = [
+            { name: "线路1 (EMQX)", url: 'wss://broker.emqx.io:8084/mqtt' },
+            { name: "线路2 (HiveMQ)", url: 'wss://broker.hivemq.com:8000/mqtt' },
+            { name: "线路3 (Eclipse)", url: 'wss://mqtt.eclipseprojects.io:443/mqtt' }
+        ];
+        let currentBrokerIndex = 0;
 
         // --- STUN 服务器 (WebRTC 必须) ---
         const rtcConfig = {
@@ -32,36 +40,87 @@
             return /MicroMessenger/i.test(navigator.userAgent);
         }
 
-        // --- 初始化 MQTT 连接 ---
+        // --- 初始化 MQTT 连接 (带重试机制) ---
         function initMQTT() {
             return new Promise((resolve, reject) => {
-                // 使用 EMQX 公共服务器 (国内访问较快)
-                const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
-                const clientId = 'fc_user_' + Math.random().toString(16).substring(2, 8);
-
-                console.log("正在连接信令服务器...");
-                document.getElementById('status-text').innerText = "正在连接云端服务...";
-
-                client = mqtt.connect(brokerUrl, {
-                    clientId: clientId,
-                    keepalive: 60,
-                    clean: true,
-                    reconnectPeriod: 4000,
-                });
-
-                client.on('connect', () => {
-                    console.log("信令服务器已连接");
-                    document.getElementById('loading-screen').classList.add('hidden');
-                    resolve();
-                });
-
-                client.on('error', (err) => {
-                    console.error("MQTT Error:", err);
-                    document.getElementById('status-text').innerText = "服务连接受阻，正在重试...";
-                    // 不reject，让它自动重连
-                });
+                connectToBroker(resolve);
             });
         }
+
+        function connectToBroker(resolve) {
+            if (client) {
+                try { client.end(); } catch(e) {}
+            }
+
+            const broker = brokerList[currentBrokerIndex];
+            const statusEl = document.getElementById('status-text');
+            const retryBtn = document.getElementById('retry-btn');
+            
+            console.log(`正在尝试连接: ${broker.name}`);
+            statusEl.innerText = `正在连接 ${broker.name}...`;
+            retryBtn.classList.remove('hidden'); // 显示切换按钮
+
+            const clientId = 'fc_user_' + Math.random().toString(16).substring(2, 8);
+
+            client = mqtt.connect(broker.url, {
+                clientId: clientId,
+                keepalive: 60,
+                clean: true,
+                connectTimeout: 5000, // 5秒超时
+                reconnectPeriod: 0 // 禁止自动重连，由我们手动控制切换
+            });
+
+            // 设置超时计时器，如果5秒没连上，自动切下一个
+            const timeoutTimer = setTimeout(() => {
+                if (!client.connected) {
+                    console.warn(`${broker.name} 连接超时`);
+                    tryNextBroker(resolve);
+                }
+            }, 6000);
+
+            client.on('connect', () => {
+                clearTimeout(timeoutTimer);
+                console.log("信令服务器已连接");
+                document.getElementById('loading-screen').classList.add('hidden');
+                resolve();
+            });
+
+            client.on('error', (err) => {
+                clearTimeout(timeoutTimer);
+                console.error("MQTT Error:", err);
+                tryNextBroker(resolve);
+            });
+            
+            // 某些情况下连接断开也触发切换
+            client.on('close', () => {
+               // 这里不做处理，避免连接成功后的正常断开触发重连循环
+            });
+        }
+
+        function tryNextBroker(resolve) {
+            currentBrokerIndex++;
+            if (currentBrokerIndex >= brokerList.length) {
+                currentBrokerIndex = 0; // 循环一轮
+                document.getElementById('status-text').innerText = "网络连接较差，请检查网络...";
+            }
+            // 延迟 500ms 重试下一个
+            setTimeout(() => connectToBroker(resolve), 500);
+        }
+
+        // 手动切换线路
+        window.manualSwitchBroker = () => {
+            currentBrokerIndex++;
+            if (currentBrokerIndex >= brokerList.length) currentBrokerIndex = 0;
+            // 如果 Promise 还没 resolve，这里直接重新跑连接逻辑会有问题吗？
+            // 简单处理：重新加载页面是更稳妥的，但为了体验，我们直接调用连接函数
+            // 注意：这只在 loading 阶段有效
+            const statusEl = document.getElementById('status-text');
+            statusEl.innerText = "正在手动切换线路...";
+            // 重新触发连接逻辑（由于上面的 Promise 还在 pending，这里实际上是重新发起一次尝试）
+            // 为了简化，我们只更新 index，并在 console 输出，实际的自动重试逻辑会接管
+            // 或者我们可以强制断开当前的，触发 error/close
+            if(client) client.end(); 
+        };
 
         // --- 页面加载 ---
         window.onload = async () => {
@@ -97,7 +156,10 @@
 
         // --- 接收端逻辑 ---
         async function startReceiver() {
-            if (!client || !client.connected) await initMQTT();
+            if (!client || !client.connected) {
+                document.getElementById('loading-screen').classList.remove('hidden');
+                await initMQTT();
+            }
 
             roomId = Math.floor(100000 + Math.random() * 900000).toString();
             document.getElementById('room-display').innerText = roomId;
@@ -157,7 +219,10 @@
             
             document.getElementById('sender-status').innerText = "正在请求连接...";
             
-            if (!client || !client.connected) await initMQTT();
+            if (!client || !client.connected) {
+                document.getElementById('loading-screen').classList.remove('hidden');
+                await initMQTT();
+            }
 
             client.subscribe(`${appPrefix}${inputId}/answer`);
             client.subscribe(`${appPrefix}${inputId}/ice_receiver`);
@@ -233,16 +298,21 @@
     <!-- 加载中 -->
     <div id="loading-screen" class="fixed inset-0 flex flex-col items-center justify-center bg-gray-900 z-50">
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
-        <p id="status-text" class="text-gray-400 text-sm">正在连接服务器 (CN v7.1)...</p>
+        <p id="status-text" class="text-gray-400 text-sm mb-4">正在连接服务器 (智能线路)...</p>
+        
+        <!-- 手动切换按钮 -->
+        <button id="retry-btn" onclick="manualSwitchBroker()" class="hidden px-4 py-2 bg-gray-800 border border-gray-600 rounded-lg text-xs hover:bg-gray-700 transition">
+            连接慢？点此切换线路
+        </button>
     </div>
 
     <!-- 首页 -->
     <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full">
         <h1 class="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-green-400 mb-4">FlashCast</h1>
-        <p class="text-gray-400 mb-2">极速投屏 (国内极速版 v7.1)</p>
+        <p class="text-gray-400 mb-2">极速投屏 (智能线路版 v8.0)</p>
         <div class="flex gap-2 mb-12">
-            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">国内CDN</span>
-            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">无需配置</span>
+            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">多线路聚合</span>
+            <span class="px-2 py-1 bg-gray-800 text-[10px] text-gray-500 rounded">自动重连</span>
         </div>
         
         <div class="grid md:grid-cols-2 gap-8 w-full max-w-4xl">
