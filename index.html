@@ -10,9 +10,9 @@
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
         import { getFirestore, collection, doc, onSnapshot, updateDoc, addDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-        // --- 用户自定义配置 (用于部署到 Vercel) ---
+        // --- 核心配置：这里已经填好了您的账号信息 ---
         const myConfig = {
-            apiKey: "AIzaSyCf0izklfHKKUy1WLY6_lMYlPAueOOytCA",
+            apiKey: "AIzaSyCf0izklfHKKUy1WLY6_lMYlPAue00yTCA", 
             authDomain: "phone-mirror-f58e6.firebaseapp.com",
             projectId: "phone-mirror-f58e6",
             storageBucket: "phone-mirror-f58e6.firebasestorage.app",
@@ -21,21 +21,20 @@
             measurementId: "G-T1SQ5HZL1P"
         };
        
-        // --- 智能初始化逻辑 ---
+        // --- 初始化逻辑 ---
         let app;
         try {
-            // 优先检查是否有预览环境配置 (修复你在当前窗口运行报错的问题)
+            // 优先检查是否有预览环境配置
             if (typeof __firebase_config !== 'undefined') {
-                console.log("Using Preview Config");
                 app = initializeApp(JSON.parse(__firebase_config));
             } else {
-                // 如果没有预览配置(说明是在 Vercel 或本地打开)，则使用你的配置
-                console.log("Using Custom Config");
+                // 如果没有预览配置，则使用上方填写的 myConfig
                 app = initializeApp(myConfig);
             }
         } catch (e) {
             console.error("Firebase Init Error:", e);
-            alert("配置初始化失败，请检查控制台");
+            // 如果报错，说明配置没填对
+            alert("启动失败：请检查 index.html 里的配置信息是否正确。");
         }
 
         const auth = getAuth(app);
@@ -52,17 +51,18 @@
         let user = null;
         const appId = 'flashcast-default'; 
 
-        // 添加错误处理，如果 Key 不对，提示用户
+        // 登录逻辑
         signInAnonymously(auth).catch(error => {
             console.error("Auth failed", error);
             if (error.code === 'auth/api-key-not-valid') {
-                alert("错误：API Key 无效。请检查 index.html 文件中的 apiKey 是否复制正确（注意 l/1, 0/O 的区别）。");
+                alert("错误：API Key 无效，请重新检查代码中的 apiKey。");
             }
         });
 
         onAuthStateChanged(auth, (u) => {
             user = u;
             if(u) {
+                // 登录成功后，隐藏加载圈
                 const loading = document.getElementById('loading-screen');
                 if(loading) loading.style.display = 'none';
                 checkUrlParams();
@@ -203,6 +203,7 @@
 <body class="bg-slate-900 text-white font-sans h-screen overflow-hidden">
     <div id="loading-screen" class="fixed inset-0 flex items-center justify-center bg-slate-900 z-50">
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
+        <p class="absolute mt-20 text-slate-400 text-sm">正在连接服务器...</p>
     </div>
     <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full">
         <h1 class="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400 mb-4">FlashCast</h1>
