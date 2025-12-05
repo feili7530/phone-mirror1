@@ -4,292 +4,247 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FlashCast 极速投屏</title>
-    <!-- 引入 Tailwind CSS 进行样式美化 -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- 引入 Firebase -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
         import { getFirestore, collection, doc, onSnapshot, updateDoc, addDoc, getDoc } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
 
-        // --- 配置区域 ---
-        // 为了方便演示，这里使用了通用的配置。如果用于生产，请替换为你自己的 Firebase 配置
-        // 由于是纯 HTML 单文件，我们需要从全局变量获取配置，或者在这里硬编码
-        // 注意：这里的 __firebase_config 只有在特定的云环境中才存在。
-        // 如果你在本地或 Vercel 运行，你需要填入你自己的 Firebase Config 如下：
-        /*
-        const firebaseConfig = {apiKey: "AIzaSyCf0izklfHKKUy1WLY6_lMYlpAue00yTCA",
-  authDomain: "phone-mirror-f58e6.firebaseapp.com",
-  projectId: "phone-mirror-f58e6",
-  storageBucket: "phone-mirror-f58e6.firebasestorage.app",
-  messagingSenderId: "142594940914",
-  appId: "1:142594940914:web:0811b9b124c3fa551b956b",
-  measurementId: "G-T1SQ5HZL1P"
+        // --- 用户自定义配置 (用于部署到 Vercel) ---
+        const myConfig = {
+            apiKey: "AIzaSyCf0izklfHKKUy1WLY6_lMYlPAueOOytCA",
+            authDomain: "phone-mirror-f58e6.firebaseapp.com",
+            projectId: "phone-mirror-f58e6",
+            storageBucket: "phone-mirror-f58e6.firebasestorage.app",
+            messagingSenderId: "142594940914",
+            appId: "1:142594940914:web:0811b9b124c3fa551b956b",
+            measurementId: "G-T1SQ5HZL1P"
         };
-        */
        
-        // 为了让你能直接运行，我会尝试读取环境配置，如果读不到，会提示你。
-        let firebaseConfig;
+        // --- 智能初始化逻辑 ---
+        let app;
         try {
+            // 优先检查是否有预览环境配置 (修复你在当前窗口运行报错的问题)
             if (typeof __firebase_config !== 'undefined') {
-                firebaseConfig = JSON.parse(__firebase_config);
+                console.log("Using Preview Config");
+                app = initializeApp(JSON.parse(__firebase_config));
             } else {
-                // 如果没有配置，这里需要手动填入，或者代码会报错
-                console.warn("未检测到自动注入的 Firebase 配置。请在代码中手动填入。");
-                alert("错误：未检测到 Firebase 配置。如果你是直接部署，请在 index.html 代码中填入你的 firebaseConfig。");
-                throw new Error("No config");
+                // 如果没有预览配置(说明是在 Vercel 或本地打开)，则使用你的配置
+                console.log("Using Custom Config");
+                app = initializeApp(myConfig);
             }
+        } catch (e) {
+            console.error("Firebase Init Error:", e);
+            alert("配置初始化失败，请检查控制台");
+        }
 
-            const app = initializeApp(firebaseConfig);
-            const auth = getAuth(app);
-            const db = getFirestore(app);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        
+        const rtcConfig = {
+            iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }],
+            iceCandidatePoolSize: 10,
+        };
+
+        let peerConnection = null;
+        let localStream = null;
+        let roomId = null;
+        let user = null;
+        const appId = 'flashcast-default'; 
+
+        // 添加错误处理，如果 Key 不对，提示用户
+        signInAnonymously(auth).catch(error => {
+            console.error("Auth failed", error);
+            if (error.code === 'auth/api-key-not-valid') {
+                alert("错误：API Key 无效。请检查 index.html 文件中的 apiKey 是否复制正确（注意 l/1, 0/O 的区别）。");
+            }
+        });
+
+        onAuthStateChanged(auth, (u) => {
+            user = u;
+            if(u) {
+                const loading = document.getElementById('loading-screen');
+                if(loading) loading.style.display = 'none';
+                checkUrlParams();
+            }
+        });
+
+        // --- 页面逻辑 ---
+        window.showHome = () => switchView('home-screen');
+        window.showReceiver = () => {
+            switchView('receiver-screen');
+            startReceiver();
+        };
+        window.showSender = () => {
+            switchView('sender-screen');
+            if(roomId) document.getElementById('room-input').value = roomId;
+        };
+
+        function switchView(id) {
+            document.querySelectorAll('.view-screen').forEach(el => el.classList.add('hidden'));
+            document.getElementById(id).classList.remove('hidden');
+        }
+
+        function checkUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            const urlRoomId = params.get('roomId');
+            if (urlRoomId) {
+                roomId = urlRoomId;
+                showSender();
+            } else {
+                showHome();
+            }
+        }
+
+        // --- 接收端逻辑 (电脑) ---
+        async function startReceiver() {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            roomId = Math.floor(100000 + Math.random() * 900000).toString();
+            document.getElementById('room-display').innerText = roomId;
             
-            // WebRTC 配置
-            const rtcConfig = {
-                iceServers: [{ urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] }],
-                iceCandidatePoolSize: 10,
+            const connectUrl = `${window.location.href.split('?')[0]}?roomId=${roomId}`;
+            const qrApi = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(connectUrl)}&bgcolor=1e293b&color=ffffff&margin=10`;
+            document.getElementById('qr-img').src = qrApi;
+            document.getElementById('connect-link').innerText = connectUrl;
+
+            const callDoc = doc(db, 'artifacts', appId, 'public', 'data', 'calls', roomId);
+            const offerCandidates = collection(callDoc, 'offerCandidates');
+            const answerCandidates = collection(callDoc, 'answerCandidates');
+
+            peerConnection.onicecandidate = event => {
+                if (event.candidate) addDoc(offerCandidates, event.candidate.toJSON());
             };
 
-            let peerConnection = null;
-            let localStream = null;
-            let roomId = null;
-            let user = null;
-            const appId = 'flashcast-default'; // 简单的 App ID
+            peerConnection.ontrack = event => {
+                const video = document.getElementById('remote-video');
+                video.srcObject = event.streams[0];
+                document.getElementById('receiver-waiting').classList.add('hidden');
+                video.classList.remove('hidden');
+            };
 
-            // --- 认证 ---
-            signInAnonymously(auth).then(() => {
-                console.log("Logged in anonymously");
-            }).catch(error => console.error("Auth failed", error));
-
-            onAuthStateChanged(auth, (u) => {
-                user = u;
-                if(u) {
-                    document.getElementById('loading-screen').style.display = 'none';
-                    checkUrlParams();
+            onSnapshot(callDoc, async (snapshot) => {
+                const data = snapshot.data();
+                if (!peerConnection.currentRemoteDescription && data?.offer) {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    await updateDoc(callDoc, { answer: { type: answer.type, sdp: answer.sdp } });
                 }
             });
 
-            // --- 页面逻辑 ---
-            window.showHome = () => switchView('home-screen');
-            window.showReceiver = () => {
-                switchView('receiver-screen');
-                startReceiver();
-            };
-            window.showSender = () => {
-                switchView('sender-screen');
-                // 如果是从 URL 进来的，自动填入
-                if(roomId) document.getElementById('room-input').value = roomId;
-            };
+            onSnapshot(answerCandidates, (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                });
+            });
+        }
 
-            function switchView(id) {
-                document.querySelectorAll('.view-screen').forEach(el => el.classList.add('hidden'));
-                document.getElementById(id).classList.remove('hidden');
-            }
+        // --- 发送端逻辑 (手机) ---
+        window.startSharing = async (type) => {
+            const inputId = document.getElementById('room-input').value;
+            if(!inputId) return alert("请输入连接码");
+            document.getElementById('sender-status').innerText = "正在连接...";
+            
+            try {
+                const callDoc = doc(db, 'artifacts', appId, 'public', 'data', 'calls', inputId);
+                const docSnap = await getDoc(callDoc);
+                if (!docSnap.exists()) return alert('房间不存在');
 
-            function checkUrlParams() {
-                const params = new URLSearchParams(window.location.search);
-                const urlRoomId = params.get('roomId');
-                if (urlRoomId) {
-                    roomId = urlRoomId;
-                    showSender();
-                } else {
-                    showHome();
-                }
-            }
-
-            // --- 接收端逻辑 (电脑) ---
-            async function startReceiver() {
                 peerConnection = new RTCPeerConnection(rtcConfig);
-                
-                // 生成房间号
-                roomId = Math.floor(100000 + Math.random() * 900000).toString();
-                document.getElementById('room-display').innerText = roomId;
-                
-                // 生成二维码
-                const connectUrl = `${window.location.href.split('?')[0]}?roomId=${roomId}`;
-                const qrApi = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(connectUrl)}&bgcolor=1e293b&color=ffffff&margin=10`;
-                document.getElementById('qr-img').src = qrApi;
-                document.getElementById('connect-link').innerText = connectUrl;
-
-                // Firestore 监听
-                const callDoc = doc(db, 'artifacts', appId, 'public', 'data', 'calls', roomId);
                 const offerCandidates = collection(callDoc, 'offerCandidates');
                 const answerCandidates = collection(callDoc, 'answerCandidates');
 
                 peerConnection.onicecandidate = event => {
-                    if (event.candidate) addDoc(offerCandidates, event.candidate.toJSON());
+                    if (event.candidate) addDoc(answerCandidates, event.candidate.toJSON());
                 };
 
-                peerConnection.ontrack = event => {
-                    const video = document.getElementById('remote-video');
-                    video.srcObject = event.streams[0];
-                    document.getElementById('receiver-waiting').classList.add('hidden');
-                    video.classList.remove('hidden');
-                };
+                if (type === 'screen') {
+                    localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+                } else {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
+                }
 
-                onSnapshot(callDoc, async (snapshot) => {
+                localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+                document.getElementById('local-video').srcObject = localStream;
+                document.getElementById('sender-ui-start').classList.add('hidden');
+                document.getElementById('sender-ui-streaming').classList.remove('hidden');
+
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                await updateDoc(callDoc, { offer: { type: offer.type, sdp: offer.sdp } });
+
+                onSnapshot(callDoc, (snapshot) => {
                     const data = snapshot.data();
-                    if (!peerConnection.currentRemoteDescription && data?.offer) {
-                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-                        await updateDoc(callDoc, { answer: { type: answer.type, sdp: answer.sdp } });
+                    if (!peerConnection.currentRemoteDescription && data?.answer) {
+                        peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                        document.getElementById('sender-status').innerText = "正在投屏中";
                     }
                 });
 
-                onSnapshot(answerCandidates, (snapshot) => {
+                onSnapshot(offerCandidates, (snapshot) => {
                     snapshot.docChanges().forEach((change) => {
                         if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data()));
                     });
                 });
+
+            } catch (err) {
+                console.error(err);
+                alert("连接失败: " + err.message);
             }
+        };
 
-            // --- 发送端逻辑 (手机) ---
-            window.startSharing = async (type) => {
-                const inputId = document.getElementById('room-input').value;
-                if(!inputId) return alert("请输入连接码");
-                
-                document.getElementById('sender-status').innerText = "正在连接...";
-                
-                try {
-                    const callDoc = doc(db, 'artifacts', appId, 'public', 'data', 'calls', inputId);
-                    const docSnap = await getDoc(callDoc);
-                    if (!docSnap.exists()) return alert('房间不存在');
-
-                    peerConnection = new RTCPeerConnection(rtcConfig);
-                    const offerCandidates = collection(callDoc, 'offerCandidates');
-                    const answerCandidates = collection(callDoc, 'answerCandidates');
-
-                    peerConnection.onicecandidate = event => {
-                        if (event.candidate) addDoc(answerCandidates, event.candidate.toJSON());
-                    };
-
-                    if (type === 'screen') {
-                        localStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-                    } else {
-                        localStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true });
-                    }
-
-                    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
-                    
-                    // 本地预览
-                    document.getElementById('local-video').srcObject = localStream;
-                    document.getElementById('sender-ui-start').classList.add('hidden');
-                    document.getElementById('sender-ui-streaming').classList.remove('hidden');
-
-                    const offer = await peerConnection.createOffer();
-                    await peerConnection.setLocalDescription(offer);
-                    await updateDoc(callDoc, { offer: { type: offer.type, sdp: offer.sdp } });
-
-                    onSnapshot(callDoc, (snapshot) => {
-                        const data = snapshot.data();
-                        if (!peerConnection.currentRemoteDescription && data?.answer) {
-                            peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-                            document.getElementById('sender-status').innerText = "正在投屏中";
-                        }
-                    });
-
-                    onSnapshot(offerCandidates, (snapshot) => {
-                        snapshot.docChanges().forEach((change) => {
-                            if (change.type === 'added') peerConnection.addIceCandidate(new RTCIceCandidate(change.doc.data()));
-                        });
-                    });
-
-                } catch (err) {
-                    console.error(err);
-                    alert("连接失败: " + err.message);
-                }
-            };
-
-            window.stopSharing = () => {
-                if(localStream) localStream.getTracks().forEach(t => t.stop());
-                if(peerConnection) peerConnection.close();
-                window.location.reload();
-            }
-
-        } catch (e) {
-            console.error(e);
+        window.stopSharing = () => {
+            if(localStream) localStream.getTracks().forEach(t => t.stop());
+            if(peerConnection) peerConnection.close();
+            window.location.reload();
         }
     </script>
 </head>
 <body class="bg-slate-900 text-white font-sans h-screen overflow-hidden">
-
-    <!-- 加载中 -->
     <div id="loading-screen" class="fixed inset-0 flex items-center justify-center bg-slate-900 z-50">
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500"></div>
     </div>
-
-    <!-- 首页 -->
     <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full">
         <h1 class="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400 mb-4">FlashCast</h1>
         <p class="text-slate-400 mb-12">极速网页投屏工具</p>
-        
         <div class="grid md:grid-cols-2 gap-8 w-full max-w-4xl">
             <button onclick="showReceiver()" class="p-8 bg-slate-800 rounded-2xl hover:bg-slate-700 transition border border-slate-700 hover:border-blue-500">
                 <div class="text-4xl mb-4">🖥️</div>
                 <h2 class="text-2xl font-bold mb-2">我是电脑 (接收端)</h2>
-                <p class="text-slate-400">创建房间，等待投屏</p>
             </button>
-
             <button onclick="showSender()" class="p-8 bg-slate-800 rounded-2xl hover:bg-slate-700 transition border border-slate-700 hover:border-purple-500">
                 <div class="text-4xl mb-4">📱</div>
                 <h2 class="text-2xl font-bold mb-2">我是手机 (发送端)</h2>
-                <p class="text-slate-400">扫码连接，分享画面</p>
             </button>
         </div>
     </div>
-
-    <!-- 接收端界面 -->
     <div id="receiver-screen" class="view-screen hidden h-full relative bg-black">
         <button onclick="showHome()" class="absolute top-4 left-4 z-10 p-2 bg-slate-800 rounded-full">✕</button>
-        
         <div id="receiver-waiting" class="flex flex-col items-center justify-center h-full">
             <div class="bg-slate-800 p-8 rounded-3xl border border-slate-700 text-center max-w-md">
                 <h2 class="text-xl text-slate-400 mb-4">手机扫码连接</h2>
-                <div class="bg-slate-900 p-4 rounded-xl inline-block mb-4">
-                    <img id="qr-img" class="w-48 h-48 object-contain" alt="QR">
-                </div>
+                <div class="bg-slate-900 p-4 rounded-xl inline-block mb-4"><img id="qr-img" class="w-48 h-48 object-contain"></div>
                 <p class="text-slate-500 text-sm mb-4 break-all" id="connect-link"></p>
-                <div class="text-4xl font-mono font-bold tracking-widest bg-slate-900 py-4 rounded-xl border border-slate-600">
-                    <span id="room-display">...</span>
-                </div>
+                <div class="text-4xl font-mono font-bold tracking-widest bg-slate-900 py-4 rounded-xl border border-slate-600"><span id="room-display">...</span></div>
                 <p class="mt-4 text-sm text-slate-500 animate-pulse">等待连接中...</p>
             </div>
         </div>
-        
         <video id="remote-video" autoplay playsinline class="hidden w-full h-full object-contain"></video>
     </div>
-
-    <!-- 发送端界面 -->
     <div id="sender-screen" class="view-screen hidden h-full flex flex-col bg-slate-900">
-        <div class="p-4 bg-slate-800 flex items-center gap-4">
-            <button onclick="showHome()" class="text-2xl">✕</button>
-            <h2 class="font-bold">发送端</h2>
-        </div>
-
+        <div class="p-4 bg-slate-800 flex items-center gap-4"><button onclick="showHome()" class="text-2xl">✕</button><h2 class="font-bold">发送端</h2></div>
         <div class="flex-1 p-6 flex flex-col items-center justify-center">
             <div id="sender-ui-start" class="w-full max-w-sm space-y-6">
-                <div>
-                    <label class="block text-slate-400 text-sm mb-2">连接码</label>
-                    <input type="number" id="room-input" placeholder="输入电脑上的数字" class="w-full bg-slate-800 border border-slate-600 rounded-xl p-4 text-2xl text-center text-white focus:outline-none focus:border-blue-500">
-                </div>
-                <button onclick="startSharing('screen')" class="w-full bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-bold text-lg">
-                    📡 投射屏幕
-                </button>
-                <button onclick="startSharing('camera')" class="w-full bg-slate-700 hover:bg-slate-600 text-white p-4 rounded-xl font-bold text-lg">
-                    📷 投射摄像头
-                </button>
+                <div><label class="block text-slate-400 text-sm mb-2">连接码</label><input type="number" id="room-input" class="w-full bg-slate-800 border border-slate-600 rounded-xl p-4 text-2xl text-center text-white"></div>
+                <button onclick="startSharing('screen')" class="w-full bg-blue-600 hover:bg-blue-500 text-white p-4 rounded-xl font-bold text-lg">📡 投射屏幕</button>
+                <button onclick="startSharing('camera')" class="w-full bg-slate-700 hover:bg-slate-600 text-white p-4 rounded-xl font-bold text-lg">📷 投射摄像头</button>
                 <p id="sender-status" class="text-center text-slate-500"></p>
             </div>
-
             <div id="sender-ui-streaming" class="hidden w-full h-full flex flex-col items-center">
                 <video id="local-video" autoplay muted playsinline class="w-full h-64 bg-black rounded-xl object-cover mb-8 opacity-50"></video>
-                <button onclick="stopSharing()" class="bg-red-500 text-white px-8 py-4 rounded-full font-bold text-lg shadow-lg">
-                    🛑 停止投屏
-                </button>
+                <button onclick="stopSharing()" class="bg-red-500 text-white px-8 py-4 rounded-full font-bold text-lg shadow-lg">🛑 停止投屏</button>
             </div>
         </div>
     </div>
-
 </body>
 </html>
