@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FlashCast 万能启动版</title>
+    <title>FlashCast 万能启动版 v5.0</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
@@ -16,49 +16,54 @@
         let localStream = null;
         let roomId = null;
         
-        // 尝试从本地存储读取配置
-        const savedConfig = localStorage.getItem('fc_config_v2');
+        const savedConfig = localStorage.getItem('fc_config_v5');
 
-        // 初始化函数
+        // --- 核心：更强大的配置解析器 ---
+        function parseConfig(input) {
+            try {
+                // 1. 找到第一个 { 和最后一个 }
+                const start = input.indexOf('{');
+                const end = input.lastIndexOf('}') + 1;
+                if (start === -1 || end === 0) throw new Error("未找到 { ... } 配置块");
+                
+                let objectStr = input.substring(start, end);
+
+                // 2. 及其关键：使用 Function 构造器来解析 JS 对象字符串
+                // 这比 JSON.parse 强大得多，支持注释、无引号键名、单引号等所有 JS 写法
+                const config = new Function("return " + objectStr)();
+                return config;
+            } catch (e) {
+                console.error("解析失败", e);
+                throw new Error("配置格式无法识别，请确保您复制了完整的 { ... } 内容");
+            }
+        }
+
         window.startApp = async () => {
             const input = document.getElementById('config-input').value;
             if (!input.trim()) return alert("请先粘贴配置代码！");
 
-            let config = null;
-
             try {
-                // 1. 智能提取配置对象 (容错处理)
-                // 移除 const firebaseConfig = 等干扰字符，只提取 { ... }
-                let jsonStr = input.substring(input.indexOf('{'), input.lastIndexOf('}') + 1);
+                const config = parseConfig(input);
                 
-                // 将非标准 JSON 格式转换为标准 JSON (给 key 加上双引号)
-                jsonStr = jsonStr
-                    .replace(/([a-zA-Z0-9_]+):/g, '"$1":') // 把 key 加上引号
-                    .replace(/'/g, '"') // 把单引号变双引号
-                    .replace(/,\s*}/g, '}'); // 去掉末尾逗号
-
-                config = JSON.parse(jsonStr);
-                
-                // 2. 初始化 Firebase
-                // 如果已存在实例，不仅要重新初始化，最好是刷新页面，但这里我们尝试覆盖
-                try {
-                    app = initializeApp(config, "app-" + Date.now()); 
-                } catch(e) {
-                    app = initializeApp(config);
+                // 验证关键字段
+                if (!config.apiKey || !config.authDomain) {
+                    throw new Error("配置中缺少 apiKey 或 authDomain，请检查是否复制完整。");
                 }
-                
+
+                // 初始化
+                try { app = initializeApp(config, "app-" + Date.now()); } catch(e) { app = initializeApp(config); }
                 auth = getAuth(app);
                 db = getFirestore(app);
 
-                // 3. 尝试登录
+                // 界面切换
                 document.getElementById('setup-panel').classList.add('hidden');
                 document.getElementById('loading-screen').classList.remove('hidden');
-                document.getElementById('loading-text').innerText = "正在验证密钥...";
+                document.getElementById('loading-text').innerText = "正在验证密钥 (v5.0)...";
                 
                 await signInAnonymously(auth);
                 
-                // 4. 成功！保存配置到本地
-                localStorage.setItem('fc_config_v2', input);
+                // 成功保存
+                localStorage.setItem('fc_config_v5', input);
                 document.getElementById('loading-screen').classList.add('hidden');
                 checkUrlParams();
 
@@ -67,27 +72,23 @@
                 document.getElementById('loading-screen').classList.add('hidden');
                 document.getElementById('setup-panel').classList.remove('hidden');
                 
-                // 专门处理 Key 错误
-                if (e.code === 'auth/api-key-not-valid' || e.message.includes('api-key')) {
-                    alert("❌ 验证失败：API Key 依然无效。\n请确保您复制的是 Firebase 控制台里【完整】的代码块。");
+                if (e.code === 'auth/api-key-not-valid' || (e.message && e.message.includes('api-key'))) {
+                    alert("❌ API Key 无效！\nGoogle 拒绝了连接。请重新去 Firebase 复制。");
                 } else {
-                    alert("❌ 启动失败：配置格式无法解析。\n\n错误详情：" + e.message);
+                    alert("❌ 启动错误：\n" + e.message);
                 }
-                // 如果失败，清除错误的缓存
-                localStorage.removeItem('fc_config_v2');
+                localStorage.removeItem('fc_config_v5');
             }
         };
 
         window.resetConfig = () => {
-            localStorage.removeItem('fc_config_v2');
+            localStorage.removeItem('fc_config_v5');
             window.location.reload();
         };
 
-        // 页面加载时
         window.onload = () => {
             if (savedConfig) {
                 document.getElementById('config-input').value = savedConfig;
-                // 自动尝试启动
                 window.startApp(); 
             }
         };
@@ -194,14 +195,13 @@
     <!-- 1. 配置输入面板 -->
     <div id="setup-panel" class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-slate-900 p-6">
         <div class="bg-slate-800 p-8 rounded-2xl shadow-2xl max-w-lg w-full border border-slate-700">
-            <h2 class="text-2xl font-bold mb-4 text-blue-400">第一步：粘贴配置</h2>
+            <h2 class="text-2xl font-bold mb-4 text-blue-400">第一步：粘贴配置 (v5.0)</h2>
             <p class="text-slate-400 text-sm mb-4">
-                请去 <a href="https://console.firebase.google.com/" target="_blank" class="text-blue-400 underline">Firebase 控制台</a> -> 项目设置 -> 下方“您的应用”，复制整个 <code class="bg-slate-900 px-1 rounded text-yellow-300">const firebaseConfig = { ... }</code> 代码块，然后直接粘贴到下面：
+                请直接从 Firebase 复制整段 <code class="bg-slate-900 px-1 rounded text-yellow-300">const firebaseConfig = { ... }</code> 代码（包含注释也没关系），粘贴到下面：
             </p>
             <textarea id="config-input" class="w-full h-48 bg-slate-900 border border-slate-600 rounded-xl p-4 text-xs font-mono text-green-400 mb-6 focus:ring-2 focus:ring-blue-500 outline-none" placeholder='const firebaseConfig = {
   apiKey: "AIzaSy...",
-  authDomain: "...",
-  ...
+  // ...
 };'></textarea>
             <button onclick="startApp()" class="w-full bg-blue-600 hover:bg-blue-500 text-white py-3 rounded-xl font-bold transition-all shadow-lg shadow-blue-900/50">
                 🚀 启动并验证
@@ -213,13 +213,13 @@
     <div id="loading-screen" class="hidden fixed inset-0 flex flex-col items-center justify-center bg-slate-900 z-40">
         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-500 mb-4"></div>
         <p id="loading-text" class="text-slate-400">正在验证配置...</p>
-        <button onclick="resetConfig()" class="mt-8 text-sm text-red-400 underline">一直卡住？点此重置</button>
+        <button onclick="resetConfig()" class="mt-8 text-sm text-red-400 underline">重置配置</button>
     </div>
 
     <!-- 3. 主界面 (同前) -->
     <div id="home-screen" class="view-screen hidden container mx-auto px-4 py-12 flex flex-col items-center justify-center h-full">
         <h1 class="text-5xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-400 mb-4">FlashCast</h1>
-        <p class="text-slate-400 mb-12">极速网页投屏工具 (Universal)</p>
+        <p class="text-slate-400 mb-12">极速网页投屏工具 (Universal v5.0)</p>
         <div class="grid md:grid-cols-2 gap-8 w-full max-w-4xl">
             <button onclick="showReceiver()" class="p-8 bg-slate-800 rounded-2xl hover:bg-slate-700 transition border border-slate-700 hover:border-blue-500">
                 <div class="text-4xl mb-4">🖥️</div><h2 class="text-2xl font-bold mb-2">我是电脑 (接收端)</h2>
